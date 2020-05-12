@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Signal Wave</title>
+    <style>
+.signal-main-view {
+  position: relative;
+  overflow: auto;
+}
+
+.signal-time-line {
+  position: -webkit-sticky;
+  position: sticky;
+  left: 0;
+
+  min-height: 1px;
+  background: #efefef;
+  margin-bottom: 0.25em;
+  cursor: pointer;
+
+  user-select: none;
+  z-index: 0;
+}
+
+.signal-time-line-marker {
+  position: absolute;
+  z-index: 0;
+  background: #efefef;
+}
+
+.signal-time-line-range-marker {
+  position: absolute;
+  top: 0;
+  background-color: rgba(255, 255, 00, 0.75);
+  height: 100%;
+  z-index: 1;
+  cursor: text;
+}
+
+.range-handle {
+  position: absolute;
+  height: 100%;
+  top: 0;
+}
+
+.range-left-handle {
+  left: 0;
+  cursor: w-resize;
+}
+
+.range-right-handle {
+  right: 0;
+  cursor: e-resize;
+}
+
+.range-progress {
+  left: 0;
+  background: black;
+  width: 1px;
+}
+
+.signal-plot {
+  position: -webkit-sticky;
+  position: sticky;
+  left: 0;
+  cursor: text;
+  z-index: 0;
+}
+
+.signal-fake-scrollbar {
+  min-height: 1px;
+}
+
+.sequencer-column {
+  display: inline-block;
+  padding: 0 10px;
+  vertical-align: bottom;
+}
+
+.sequencer-column-time {
+  width: 50px;
+}
+
+.sequencer-column-time-playing {
+  background: orange;
+}
+
+.sequencer-box {
+  box-sizing: border-box;
+  height: 50px;
+  line-height: 50px;
+  text-align: center;
+  margin-bottom: 15px;
+}
+
+.sequencer-time-box {
+  background: #efefef;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.sequencer-time-box-selected {
+  background: yellow;
+}
+    </style>
+    <script src="vue.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <input type="file" v-on:change="readFile">
+      <hr>
+      <signal-wave-component
+        v-if="swc.audioBuffer !== null"
+        v-on:input="receiveRange"
+        v-bind:audio-buffer="swc.audioBuffer"
+        v-bind:plot-height="swc.plotHeight"
+        v-bind:time-line-height="swc.timeLineHeight"
+        v-bind:pixels-per-second="swc.pixelsPerSecond"
+        v-bind:samples-step-size="swc.samplesStepSize">
+      </signal-wave-component>
+      <hr>
+      <sequencer-component
+        v-bind:samples="samples"
+        v-bind:bpm="sc.bpm"
+        v-bind:time-units="sc.timeUnits">
+      </sequencer-component>
+      <hr>
+    </div>
+    <script>
+function sliceAudioBuffer (audioBuffer, start, stop) {
+  const { sampleRate, numberOfChannels } = audioBuffer
+  const length = stop - start
+
+  const slicedAudioBuffer = new AudioBuffer({
+    length,
+    numberOfChannels,
+    sampleRate
+  })
+
+  for (let channel = 0; channel < numberOfChannels; channel++) {
+    const srcChannel = audioBuffer.getChannelData(channel)
+    const dstChannel = slicedAudioBuffer.getChannelData(channel)
+    dstChannel.set(srcChannel.slice(start, stop), 0)
+  }
+
+  return slicedAudioBuffer
+}
+
+const SignalWaveComponent = {
+  props: {
+    audioBuffer: AudioBuffer,
+    plotHeight: Number,
+    timeLineHeight: Number,
+    pixelsPerSecond: Number,
+    samplesStepSize: Number
+  },
+
+  template: `
+<div>
+  <button type="button" v-bind:disabled="rangeStart === null || rangeStop === null || progress !== 0" v-on:click="play">Play</button> |
+  <button type="button" v-bind:disabled="rangeStart === null || rangeStop === null" v-on:click="output">Save sample</button>
+  <hr>
+  <div
+    ref="mainView"
+    class="signal-main-view"
+    v-on:scroll="scrollLeft = $event.target.scrollLeft">
+    <!-- range markers -->
+    <div
+      ref="range"
+      v-show="rangeStart !== null && rangeStop !== null"
+      class="signal-time-line-range-marker"
+      v-bind:style="{
+        left: (rangeStart * pixelsPerSample) + 'px',
+        width: ((rangeStop - rangeStart) * pixelsPerSample) + 'px'
+      }">
+      <div ref="leftHandle" class="range-handle range-left-handle">&lt;</div>
+      <div ref="rightHandle" class="range-handle range-right-handle">&gt;</div>
+      <div
+        v-if="progress > 0"
+        class="range-handle range-progress"
+        v-bind:style="{ left: (progress * (rangeStop - rangeStart) * pixelsPerSample) + 'px' }"></div>
+    </div>
+    <!-- /range markers -->
+
+    <div
+      class="signal-time-line"
+      v-bind:style="{ height: timeLineHeight + 'px' }">
+      <div
+        v-for="marker in timeLineMarkers"
+        class="signal-time-line-marker"
+        v-bind:style="{ left: marker.position + 'px' }">
+        | {{ marker.label }}
+      </div>
+    </div>
+    <div
+      ref="plotView"
+      class="signal-plot">
+      <canvas ref="canvas" v-bind:height="plotHeight"></canvas>
+    </div>
+    <div ref="scrollBar" class="signal-fake-scrollbar" v-bind:style="{ width: scrollSize + 'px' }"></div>
+  </div>
+</div>
+  `,
+
+  data: () => {
+    return {
+      audioContext: null,
+      scrollLeft: 0,
+      plotWidth: 0,
+      timeLineMarkers: null,
+      rangeStart: null,
+      rangeStop: null,
+      progress: 0
+    }
+  },
+
+  computed: {
+    scrollSize () {
+      return this.pixelsPerSecond * this.audioBuffer.duration
+    },
+
+    pixelsPerSample () {
+      return this.pixelsPerSecond / this.audioBuffer.sampleRate
+    },
+
+    samplesPerWindowsize () {
+      return (this.plotWidth * this.audioBuffer.sampleRate) / this.pixelsPerSecond
+    },
+
+    startFromSample () {
+      return (this.scrollLeft / this.pixelsPerSample) | 0
+    }
+  },
+
+  watch: {
+    audioBuffer () {
+      this.timeLineMarkers = null
+      this.rangeStart = null
+      this.rangeStop = null
+
+      requestAnimationFrame(() => this.draw())
+    },
+
+    plotWidth () {
+      requestAnimationFrame(() => this.draw())
+    },
+
+    startFromSample () {
+      requestAnimationFrame(() => this.draw())
+    }
+  },
+
+  methods: {
+    play () {
+      const {
+        audioBuffer, rangeStart, rangeStop,
+        startFromSample, plotWidth, pixelsPerSample, samplesPerWindowsize
+      } = this
+      const padding = 100
+      let currentViewStart = startFromSample * pixelsPerSample
+      const rangeViewStart = rangeStart * pixelsPerSample
+      const rangeViewStop = rangeStop * pixelsPerSample
+      const rangeViewWidth = rangeViewStop - rangeViewStart
+
+      const audioCtx = new AudioContext()
+      const audioSource = audioCtx.createBufferSource()
+
+      audioSource.buffer = sliceAudioBuffer(audioBuffer, rangeStart, rangeStop)
+      audioSource.connect(audioCtx.destination)
+      audioSource.start()
+
+      // move to start
+      // console.log({ currentViewStart, rangeViewStart, rangeViewStop })
+
+      if (currentViewStart > rangeViewStart || (currentViewStart + plotWidth) < rangeViewStart) {
+        currentViewStart = rangeViewStart - padding
+        this.$refs.mainView.scroll(currentViewStart, 0)
+      }
+
+      // maybe find another way to animate?
+      const intId = setInterval(() => {
+        this.progress = audioCtx.currentTime / audioSource.buffer.duration
+
+        if (rangeViewWidth > plotWidth && rangeViewStop > (currentViewStart + plotWidth)) {
+          this.$refs.mainView.scroll(currentViewStart + (rangeViewWidth - (3 / 4) * plotWidth) * this.progress, 0)
+        }
+      }, 25)
+
+      audioSource.onended = () => {
+        this.progress = 0
+        clearInterval(intId)
+        audioCtx.close()
+      }
+    },
+
+    output () {
+      this.$emit('input', { rangeStart: this.rangeStart, rangeStop: this.rangeStop })
+    },
+
+    draw () {
+      const {
+        audioBuffer, plotWidth, plotHeight, pixelsPerSecond,
+        pixelsPerSample, samplesStepSize, startFromSample,
+        samplesPerWindowsize
+      } = this
+      const curveHeight = plotHeight / (audioBuffer.numberOfChannels * 2)
+
+      const canvas = this.$refs.canvas
+      const canvasCtx = canvas.getContext('2d')
+      const timeLineMarkers = []
+
+      canvas.width = plotWidth
+
+      for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+        const signal = audioBuffer.getChannelData(c)
+        const startFromY = c * curveHeight * 2
+
+        canvasCtx.beginPath()
+
+        for (let i = 0; i < samplesPerWindowsize; i += samplesStepSize) {
+          const index = startFromSample + i
+          const x = i * pixelsPerSample
+          const y = startFromY + (signal[index] + 1) * curveHeight
+          canvasCtx.lineTo(x, y)
+        }
+
+        canvasCtx.stroke()
+      }
+
+      let secondsStart = Math.ceil(startFromSample / audioBuffer.sampleRate)
+      const pixelOffset = (startFromSample % audioBuffer.sampleRate) / audioBuffer.sampleRate
+
+      for (let markerX = pixelOffset === 0 ? 0 : (1 - pixelOffset) * pixelsPerSecond;
+          markerX < canvas.width;
+          markerX += pixelsPerSecond) {
+        timeLineMarkers.push({
+          position: markerX,
+          label: secondsStart++
+        })
+      }
+
+      this.timeLineMarkers = timeLineMarkers
+    }
+  },
+
+  mounted () {
+    const { range, leftHandle, rightHandle, plotView, mainView, canvas } = this.$refs
+
+    this.plotWidth = plotView.offsetWidth
+
+    window.addEventListener('resize', () => {
+      this.plotWidth = this.$refs.plotView.offsetWidth
+    })
+
+    // drag event binding
+    let dragging = false
+    let startX = 0
+
+    document.addEventListener('mousedown', e => {
+      if (e.target === canvas || e.target === range) {
+        const position = event.clientX - mainView.offsetLeft
+        startX = this.startFromSample + (position / this.pixelsPerSample) | 0
+
+        dragging = true
+        this.rangeStart = null
+        this.rangeStop = null
+      } else if (e.target === rightHandle) {
+        dragging = true
+        startX = this.rangeStart
+      } else if (e.target === leftHandle) {
+        dragging = true
+        startX = this.rangeStop
+      }
+
+      if (dragging) {
+        e.preventDefault()
+      }
+    })
+
+    document.addEventListener('mousemove', e => {
+      if (dragging) {
+        const position = event.clientX - mainView.offsetLeft
+        const sample = this.startFromSample + (position / this.pixelsPerSample) | 0
+
+        if (position >= mainView.offsetWidth) {
+          mainView.scrollLeft += 5
+        } else if (position <= 0) {
+          mainView.scrollLeft -= 5
+        }
+
+        if (startX > sample) {
+          this.rangeStart = sample
+          this.rangeStop = startX
+        } else {
+          this.rangeStart = startX
+          this.rangeStop = sample
+        }
+
+        this.rangeStart = Math.max(0, this.rangeStart)
+        this.rangeStop = Math.min(this.audioBuffer.length, this.rangeStop)
+
+        e.preventDefault()
+      }
+    })
+
+    document.addEventListener('mouseup', e => {
+      dragging = false
+    })
+    // /drag event binding
+  }
+}
+
+const SequencerComponent = {
+  props: {
+    samples: Array
+  },
+
+  template: `
+<div class="sequencer">
+  <div class="sequencer-column">
+    <div class="sequencer-box">
+      <input type="number" v-model="timeUnits" step="1" min="1" max="8" size="2"> time units |
+      <input type="number" v-model="bpm" step="1" min="1" size="2"> BPM |
+      <button type="button" v-on:click="playingIntervalId === -1 ? play() : stop()">
+        {{ playingIntervalId === -1 ? 'Play' : 'Stop' }}
+      </button>
+    </div>
+
+    <div v-for="(sample, sampleIndex) in samples" class="sequencer-box">
+      <span>
+        {{ sample.name }}
+      </span>
+      <button type="button" v-on:click="removeSample(sampleIndex)">×</button>
+    </div>
+  </div>
+
+  <div
+    v-for="time in +timeUnits"
+    class="sequencer-column sequencer-column-time"
+    v-bind:class="{ 'sequencer-column-time-playing': playingTime === time - 1 }">
+    <div class="sequencer-box">{{ time }}</div>
+    <div
+      v-for="(sample, sampleIndex) in samples"
+      class="sequencer-box sequencer-time-box"
+      v-on:click="toggleSampleSelection(sampleIndex, time - 1)"
+      v-bind:class="{ 'sequencer-time-box-selected': (selectedSamples[time - 1]?.indexOf(sampleIndex) ?? -1) !== -1 }">
+    </div>
+  </div>
+</div>
+  `,
+
+  data: () => {
+    return {
+      timeUnits: 4,
+      bpm: 60,
+      selectedSamples: {},
+      playingTime: -1,
+      playingIntervalId: -1,
+      audioCtx: null
+    }
+  },
+
+  watch: {
+    bpm () {
+      if (this.playingIntervalId !== -1) {
+        clearInterval(this.playingIntervalId)
+        this._setInterval()
+      }
+    }
+  },
+
+  methods: {
+    _playInterval () {
+      this.playingTime = (this.playingTime + 1) % this.timeUnits
+      const selectedSample = this.selectedSamples[this.playingTime]
+
+      if (!selectedSample) {
+        return
+      }
+
+      const { audioCtx } = this
+      const sources = []
+
+      for (const selected of selectedSample) {
+        const bufferSource = audioCtx.createBufferSource()
+        bufferSource.buffer = this.samples[selected].audioBuffer
+        bufferSource.connect(audioCtx.destination)
+        sources.push(bufferSource)
+      }
+
+      sources.map(source => source.start())
+    },
+
+    _setInterval () {
+      this.playingIntervalId = setInterval(() => {
+        this._playInterval()
+      }, (1 / (this.bpm / 60)) * 1000)
+    },
+
+    play () {
+      this.audioCtx = new AudioContext()
+      this.playingTime = -1
+      this._playInterval()
+      this._setInterval()
+    },
+
+    stop () {
+      clearInterval(this.playingIntervalId)
+      this.audioCtx.close()
+      this.playingIntervalId = -1
+      this.playingTime = -1
+    },
+
+    removeSample (index) {
+      this.$delete(this.samples, index)
+
+      // remove from selected as well
+      for (const time of Object.keys(this.selectedSamples)) {
+        const innerIndex = this.selectedSamples[time].indexOf(index)
+
+        if (innerIndex !== -1) {
+          this.$delete(this.selectedSamples[time], innerIndex)
+        }
+      }
+    },
+
+    toggleSampleSelection (sample, time) {
+      if (!this.selectedSamples[time]) {
+        this.$set(this.selectedSamples, time, [])
+      }
+
+      const selectedSamples = this.selectedSamples[time]
+      const index = selectedSamples.indexOf(sample)
+
+      if (index === -1) {
+        selectedSamples.push(sample)
+      } else {
+        this.$delete(selectedSamples, index)
+      }
+    }
+  }
+}
+
+const vue = new Vue({
+  el: '#app',
+  components: {
+    SignalWaveComponent,
+    SequencerComponent
+  },
+  data: {
+    swc: {
+      audioBuffer: null,
+      plotHeight: 150,
+      timeLineHeight: 25,
+      pixelsPerSecond: 200,
+      samplesStepSize: 20
+    },
+
+    sc: {
+      bpm: 60,
+      timeUnits: 4
+    },
+
+    samples: [
+      /*{ audioBuffer: null, name: "Sample #1" },
+      { audioBuffer: null, name: "Sample #1" },
+      { audioBuffer: null, name: "Sample #1" },
+      { audioBuffer: null, name: "Sample #1" }*/
+    ]
+  },
+
+  methods: {
+    readSync (file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = e => resolve(reader.result)
+        reader.onerror = reject
+        reader.readAsArrayBuffer(file)
+      })
+    },
+
+    async readFile (e) {
+      const audioCtx = new AudioContext()
+      const file = e.target.files[0]
+      const fileBuffer = await this.readSync(file)
+      this.swc.audioBuffer = await audioCtx.decodeAudioData(fileBuffer)
+    },
+
+    receiveRange (obj) {
+      const audioBuffer = sliceAudioBuffer(this.swc.audioBuffer, obj.rangeStart, obj.rangeStop)
+      const name = `Sample #${this.samples.length + 1}`
+      this.samples.push({ name, audioBuffer })
+    }
+  }
+})
+    </script>
+  </body>
+</html>
