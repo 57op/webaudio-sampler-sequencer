@@ -420,18 +420,18 @@ const SequencerComponent = {
 <div class="sequencer">
   <div class="sequencer-column">
     <div class="sequencer-box">
-      <input type="number" v-model="timeUnits" step="1" min="1" max="8" size="2"> time units |
+      <input type="number" v-model="timeUnits" step="1" min="1" size="2"> time units |
       <input type="number" v-model="bpm" step="1" min="1" size="2"> BPM |
       <button type="button" v-on:click="playingIntervalId === -1 ? play() : stop()">
         {{ playingIntervalId === -1 ? 'Play' : 'Stop' }}
       </button>
     </div>
 
-    <div v-for="(sample, sampleIndex) in samples" class="sequencer-box">
+    <div v-for="sample in samples" class="sequencer-box">
       <span>
         {{ sample.name }}
       </span>
-      <button type="button" v-on:click="removeSample(sampleIndex)">×</button>
+      <button type="button" v-on:click="removeSample(sample)">×</button>
     </div>
   </div>
 
@@ -441,10 +441,10 @@ const SequencerComponent = {
     v-bind:class="{ 'sequencer-column-time-playing': playingTime === time - 1 }">
     <div class="sequencer-box">{{ time }}</div>
     <div
-      v-for="(sample, sampleIndex) in samples"
+      v-for="sample in samples"
       class="sequencer-box sequencer-time-box"
-      v-on:click="toggleSampleSelection(sampleIndex, time - 1)"
-      v-bind:class="{ 'sequencer-time-box-selected': (selectedSamples[time - 1]?.indexOf(sampleIndex) ?? -1) !== -1 }">
+      v-on:click="toggleSampleSelection(sample, time - 1)"
+      v-bind:class="{ 'sequencer-time-box-selected': (selectedSamples[time - 1]?.findIndex(s => s.id === sample.id) ?? -1) !== -1 }">
     </div>
   </div>
 </div>
@@ -467,6 +467,14 @@ const SequencerComponent = {
         clearInterval(this.playingIntervalId)
         this._setInterval()
       }
+    },
+
+    timeUnits (newVal) {
+      for (const key of Object.keys(this.selectedSamples)) {
+        if (key >= newVal) {
+          this.$delete(this.selectedSamples, key)
+        }
+      }
     }
   },
 
@@ -482,9 +490,9 @@ const SequencerComponent = {
       const { audioCtx } = this
       const sources = []
 
-      for (const selected of selectedSample) {
+      for (const sample of selectedSample) {
         const bufferSource = audioCtx.createBufferSource()
-        bufferSource.buffer = this.samples[selected].audioBuffer
+        bufferSource.buffer = sample.audioBuffer
         bufferSource.connect(audioCtx.destination)
         sources.push(bufferSource)
       }
@@ -512,12 +520,12 @@ const SequencerComponent = {
       this.playingTime = -1
     },
 
-    removeSample (index) {
-      this.$delete(this.samples, index)
+    removeSample (sample) {
+      this.$delete(this.samples, this.samples.findIndex(s => s.id === sample.id))
 
       // remove from selected as well
       for (const time of Object.keys(this.selectedSamples)) {
-        const innerIndex = this.selectedSamples[time].indexOf(index)
+        const innerIndex = this.selectedSamples[time].findIndex(s => s.id === sample.id)
 
         if (innerIndex !== -1) {
           this.$delete(this.selectedSamples[time], innerIndex)
@@ -531,7 +539,7 @@ const SequencerComponent = {
       }
 
       const selectedSamples = this.selectedSamples[time]
-      const index = selectedSamples.indexOf(sample)
+      const index = selectedSamples.findIndex(s => s.id === sample.id)
 
       if (index === -1) {
         selectedSamples.push(sample)
@@ -562,6 +570,7 @@ const vue = new Vue({
       timeUnits: 4
     },
 
+    sampleId: 0,
     samples: [
       /*{ audioBuffer: null, name: "Sample #1" },
       { audioBuffer: null, name: "Sample #1" },
@@ -590,7 +599,8 @@ const vue = new Vue({
     receiveRange (obj) {
       const audioBuffer = sliceAudioBuffer(this.swc.audioBuffer, obj.rangeStart, obj.rangeStop)
       const name = `Sample #${this.samples.length + 1}`
-      this.samples.push({ name, audioBuffer })
+      const id = this.sampleId++
+      this.samples.push({ id, name, audioBuffer })
     }
   }
 })
