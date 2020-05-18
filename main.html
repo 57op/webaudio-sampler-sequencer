@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Signal Wave</title>
+    <title>Web Audio API</title>
     <style>
 .signal-main-view {
   position: relative;
@@ -159,7 +159,16 @@ const SignalWaveComponent = {
   template: `
 <div>
   <button type="button" v-bind:disabled="rangeStart === null || rangeStop === null || progress !== 0" v-on:click="play">Play</button> |
-  <button type="button" v-bind:disabled="rangeStart === null || rangeStop === null" v-on:click="output">Save sample</button>
+  <button type="button" v-bind:disabled="rangeStart === null || rangeStop === null" v-on:click="output">Save sample</button> |
+  Filter:
+  <select v-model="selectedFilter">
+    <option v-bind:value="null">none</option>
+    <option v-for="filter in filters" v-bind:value="filter">{{ filter.type }}</option>
+  </select>
+  <span v-if="selectedFilter">
+    <label v-for="param in Object.keys(selectedFilter.params)">| {{ param }} <input v-bind:placeholder="param" v-model="selectedFilter.params[param]"></label>
+  </span>
+  | Detune: <input type="number" v-model="detune" size="4">
   <hr>
   <div
     ref="mainView"
@@ -211,7 +220,69 @@ const SignalWaveComponent = {
       timeLineMarkers: null,
       rangeStart: null,
       rangeStop: null,
-      progress: 0
+      progress: 0,
+
+      filters: [
+        {
+          type: 'lowpass',
+          params: {
+            frequency: 350,
+            Q: 1
+          }
+        },
+        {
+          type: 'highpass',
+          params: {
+            frequency: 350,
+            Q: 1
+          }
+        },
+        {
+          type: 'bandpass',
+          params: {
+            frequency: 350,
+            Q: 1
+          }
+        },
+        {
+          type: 'lowshelf',
+          params: {
+            frequency: 350,
+            gain: 0
+          }
+        },
+        {
+          type: 'highshelf',
+          params: {
+            frequency: 350,
+            gain: 0
+          }
+        },
+        {
+          type: 'peaking',
+          params: {
+            frequency: 350,
+            Q: 1,
+            gain: 0
+          }
+        },
+        {
+          type: 'notch',
+          params: {
+            frequency: 350,
+            Q: 1
+          }
+        },
+        {
+          type: 'allpass',
+          params: {
+            frequency: 350,
+            Q: 1
+          }
+        }
+      ],
+      detune: 0,
+      selectedFilter: null
     }
   },
 
@@ -267,11 +338,23 @@ const SignalWaveComponent = {
       const audioSource = audioCtx.createBufferSource()
 
       audioSource.buffer = sliceAudioBuffer(audioBuffer, rangeStart, rangeStop)
-      audioSource.connect(audioCtx.destination)
-      audioSource.start()
+      audioSource.detune.value = +this.detune
 
-      // move to start
-      // console.log({ currentViewStart, rangeViewStart, rangeViewStop })
+      if (this.selectedFilter !== null) {
+        const biquadFilter = audioCtx.createBiquadFilter()
+        biquadFilter.type = this.selectedFilter.type
+
+        for (const [ param, value ] of Object.entries(this.selectedFilter.params)) {
+          biquadFilter[param].value = +value
+        }
+
+        audioSource.connect(biquadFilter)
+        biquadFilter.connect(audioCtx.destination)
+      } else {
+        audioSource.connect(audioCtx.destination)
+      }
+
+      audioSource.start()
 
       if (currentViewStart > rangeViewStart || (currentViewStart + plotWidth) < rangeViewStart) {
         currentViewStart = rangeViewStart - padding
@@ -295,7 +378,56 @@ const SignalWaveComponent = {
     },
 
     output () {
-      this.$emit('input', { rangeStart: this.rangeStart, rangeStop: this.rangeStop })
+      const { audioBuffer, rangeStart, rangeStop } = this
+
+      const audioCtx = new AudioContext()
+      const audioSource = audioCtx.createBufferSource()
+      const destination = audioCtx.createMediaStreamDestination()
+
+      audioSource.buffer = sliceAudioBuffer(audioBuffer, rangeStart, rangeStop)
+      audioSource.detune.value = +this.detune
+      destination.channelCount = audioSource.buffer.numberOfChannels
+
+      if (this.selectedFilter !== null) {
+        const biquadFilter = audioCtx.createBiquadFilter()
+        biquadFilter.type = this.selectedFilter.type
+
+        for (const [ param, value ] of Object.entries(this.selectedFilter.params)) {
+          biquadFilter[param].value = +value
+        }
+
+        audioSource.connect(biquadFilter)
+        biquadFilter.connect(destination)
+      } else {
+        audioSource.connect(destination)
+      }
+
+      const recorder = new MediaRecorder(
+        destination.stream,
+        {
+          mimeType: 'audio/ogg; codecs=opus',
+          audioBitsPerSecond: audioSource.buffer.sampleRate,
+          videoBitsPerSecond: 0
+        })
+      const chunks = []
+
+      // saving a long sample
+      // will take as long as the sample duration...
+      // recorder doesn't support a capture rate setting
+      recorder.start()
+      audioSource.start()
+
+      audioSource.onended = () => {
+        recorder.stop()
+      }
+
+      recorder.ondataavailable = e => chunks.push(e.data)
+      recorder.onstop = async e => {
+        const blob = new Blob(chunks, { type: 'audio/ogg; codecs=opus' })
+        const audioBuffer = await audioCtx.decodeAudioData(await blob.arrayBuffer())
+        this.$emit('input', audioBuffer)
+        audioCtx.close()
+      }
     },
 
     draw () {
@@ -596,8 +728,7 @@ const vue = new Vue({
       this.swc.audioBuffer = await audioCtx.decodeAudioData(fileBuffer)
     },
 
-    receiveRange (obj) {
-      const audioBuffer = sliceAudioBuffer(this.swc.audioBuffer, obj.rangeStart, obj.rangeStop)
+    receiveRange (audioBuffer) {
       const name = `Sample #${this.samples.length + 1}`
       const id = this.sampleId++
       this.samples.push({ id, name, audioBuffer })
